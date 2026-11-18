@@ -1,0 +1,14 @@
+torch
+sentence-transformers
+langchain-community
+langchain-text-splitters
+langchain-huggingface
+langchain-ollama
+faiss-cpu
+pypdf
+reportlab
+fastapi
+uvicorn[standard]
+python-multipart
+jupyterlab
+ipywidgets
