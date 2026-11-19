@@ -252,22 +252,22 @@
           </div>
         </div>
 
-        <!-- Loading Skeleton -->
+        <!-- Loading Skeleton (Only shown during the initial ~15ms before FAISS chunks arrive) -->
         <div
-          v-if="querying"
+          v-if="querying && !queryResult"
           class="p-8 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col items-center justify-center text-center space-y-3"
         >
           <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
           <div class="text-sm font-medium text-slate-200">
-            Running PyTorch Embedding → FAISS Search → Ollama Generation...
+            Running PyTorch Embedding → FAISS Vector Search...
           </div>
           <div class="text-xs text-slate-500">
             Searching {{ selectedDocFilter ? `'${selectedDocFilter}'` : 'all indexed PDFs' }}...
           </div>
         </div>
 
-        <!-- Query Results -->
-        <div v-if="queryResult && !querying" class="space-y-6">
+        <!-- Query Results (Shown immediately as soon as FAISS chunks arrive, while Ollama streams!) -->
+        <div v-if="queryResult" class="space-y-6">
           <!-- Grounded Answer Card -->
           <div class="p-6 rounded-2xl bg-slate-900 border border-indigo-500/30 space-y-4">
             <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
@@ -279,15 +279,30 @@
                 <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300">
                   Scope: {{ queryResult.filter_doc || 'All PDFs' }}
                 </span>
+                <span
+                  v-if="querying"
+                  class="text-xs px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 animate-pulse"
+                >
+                  ⚡ Streaming tokens...
+                </span>
               </div>
               <div class="text-xs text-slate-400">
-                Latency: <b class="text-indigo-400">{{ queryResult.latency_ms }} ms</b> |
+                <span v-if="queryResult.retrieval_ms">
+                  FAISS Retrieval: <b class="text-emerald-400">{{ queryResult.retrieval_ms }} ms</b> |
+                </span>
+                <span v-if="!querying">
+                  Total Latency: <b class="text-indigo-400">{{ queryResult.latency_ms }} ms</b> |
+                </span>
                 Device: <b class="uppercase">{{ queryResult.device_used }}</b>
               </div>
             </div>
 
             <p class="text-sm leading-relaxed text-slate-200 whitespace-pre-line">
-              {{ queryResult.answer }}
+              <span>{{ queryResult.answer }}</span>
+              <span
+                v-if="querying"
+                class="inline-block w-2 h-4 ml-1 align-middle bg-indigo-400 animate-pulse"
+              ></span>
             </p>
           </div>
 
@@ -382,6 +397,7 @@ interface QueryResponse {
   filter_doc: string | null
   sources: SourceChunk[]
   device_used: string
+  retrieval_ms?: number
   latency_ms: number
 }
 
@@ -483,19 +499,60 @@ async function submitQuestion() {
   if (!question.value.trim()) return
   querying.value = true
   queryError.value = ''
+  queryResult.value = null
 
   try {
-    const res = await $fetch<QueryResponse>(`${apiBase}/api/query`, {
+    const response = await fetch(`${apiBase}/api/query/stream`, {
       method: 'POST',
-      body: {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         question: question.value,
         top_k: topK.value,
         doc_name: selectedDocFilter.value || null
-      }
+      })
     })
-    queryResult.value = res
+
+    if (!response.ok || !response.body) {
+      const errData = await response.json().catch(() => ({}))
+      throw new Error(errData.detail || `Server error (${response.status})`)
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder('utf-8')
+    let buffer = ''
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const events = buffer.split('\n\n')
+      buffer = events.pop() || ''
+
+      for (const evt of events) {
+        const line = evt.trim()
+        if (!line.startsWith('data: ')) continue
+        const payload = JSON.parse(line.slice(6))
+
+        if (payload.type === 'sources') {
+          queryResult.value = {
+            question: payload.question,
+            answer: '',
+            filter_doc: payload.filter_doc,
+            sources: payload.sources,
+            device_used: payload.device_used,
+            retrieval_ms: payload.retrieval_ms,
+            latency_ms: 0
+          }
+        } else if (payload.type === 'token' && queryResult.value) {
+          queryResult.value.answer += payload.content
+        } else if (payload.type === 'done' && queryResult.value) {
+          queryResult.value.latency_ms = payload.latency_ms
+        }
+      }
+    }
   } catch (err: any) {
-    queryError.value = err?.data?.detail || err?.message || 'Query failed'
+    queryError.value = err?.message || 'Query failed'
   } finally {
     querying.value = false
   }

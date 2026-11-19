@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 import torch
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
@@ -334,10 +335,12 @@ def delete_document(filename: str):
     }
 
 
-@app.post("/api/query", response_model=QueryResponse)
-def query_document(request: QueryRequest):
+def prepare_rag_context(request: QueryRequest):
     """
-    Queries across ALL indexed PDFs or filters to a single PDF via `request.doc_name`.
+    Shared helper for both /api/query and /api/query/stream:
+    1. Embeds question via PyTorch & retrieves Top-K chunks from FAISS
+    2. Sorts chunks in reading order
+    3. Builds the augmented LangChain prompt messages
     """
     if ml_state.vector_store is None or len(ml_state.documents) == 0:
         raise HTTPException(
@@ -351,12 +354,8 @@ def query_document(request: QueryRequest):
             detail=f"Document '{request.doc_name}' is not in the index.",
         )
 
-    start_time = time.perf_counter()
-
-    # Build metadata filter if the user selected a specific PDF
     search_filter = {"doc_name": request.doc_name} if request.doc_name else None
 
-    # Fetch extra candidate pool when filtering so FAISS never misses chunks in multi-doc stores
     retrieved = ml_state.vector_store.similarity_search_with_score(
         request.question,
         k=request.top_k,
@@ -379,8 +378,6 @@ def query_document(request: QueryRequest):
             )
         )
 
-    # Sort chunks in natural reading order (by document, page, and character offset)
-    # so the LLM reads timelines and multi-part sections coherently!
     retrieved_reading_order = sorted(
         retrieved,
         key=lambda item: (
@@ -422,8 +419,17 @@ def query_document(request: QueryRequest):
         "context": formatted_context,
         "question": request.question,
     })
-    ai_response = ml_state.llm.invoke(messages)
+    return sources, messages
 
+
+@app.post("/api/query", response_model=QueryResponse)
+def query_document(request: QueryRequest):
+    """
+    Standard synchronous JSON endpoint: Queries across ALL indexed PDFs or filters to a single PDF.
+    """
+    start_time = time.perf_counter()
+    sources, messages = prepare_rag_context(request)
+    ai_response = ml_state.llm.invoke(messages)
     elapsed_ms = (time.perf_counter() - start_time) * 1000
 
     return QueryResponse(
@@ -433,4 +439,54 @@ def query_document(request: QueryRequest):
         sources=sources,
         device_used=ml_state.device,
         latency_ms=round(elapsed_ms, 2),
+    )
+
+
+@app.post("/api/query/stream")
+def query_document_stream(request: QueryRequest):
+    """
+    Real-Time Server-Sent Events (SSE) Streaming Endpoint:
+    1. Immediately emits the retrieved FAISS vector chunks (~15ms)
+    2. Streams each token from Ollama (`llama3.2:3b`) as it is generated
+    3. Emits a final 'done' event with total latency
+    """
+    start_time = time.perf_counter()
+    sources, messages = prepare_rag_context(request)
+    retrieval_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+    def event_generator():
+        # 1. Immediately send the retrieved FAISS chunks + retrieval latency!
+        initial_payload = {
+            "type": "sources",
+            "question": request.question,
+            "filter_doc": request.doc_name,
+            "device_used": ml_state.device,
+            "retrieval_ms": retrieval_ms,
+            "sources": [s.model_dump() for s in sources],
+        }
+        yield f"data: {json.dumps(initial_payload)}\n\n"
+
+        # 2. Stream tokens live from Ollama as they are generated
+        for chunk in ml_state.llm.stream(messages):
+            if chunk.content:
+                token_payload = {"type": "token", "content": chunk.content}
+                yield f"data: {json.dumps(token_payload)}\n\n"
+
+        # 3. Send final completion event with total elapsed time
+        total_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        done_payload = {
+            "type": "done",
+            "retrieval_ms": retrieval_ms,
+            "latency_ms": total_ms,
+        }
+        yield f"data: {json.dumps(done_payload)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
