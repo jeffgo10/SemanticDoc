@@ -1,0 +1,52 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: semanticdoc-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=llama3.2:3b
+    volumes:
+      # Live-sync your local ./backend folder with /app in the container
+      - ./backend:/app
+      # Persist downloaded Hugging Face models so they aren't re-downloaded when rebuilding!
+      - hf_cache:/app/.cache/huggingface
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    tty: true
+    stdin_open: true
+
+  jupyter:
+    build:
+      context: ./backend
+    container_name: semanticdoc-jupyter
+    ports:
+      - "8888:8888"
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=llama3.2:3b
+    volumes:
+      - ./backend:/app
+      - hf_cache:/app/.cache/huggingface
+    command: >
+      jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+      --NotebookApp.token='' --NotebookApp.password=''
+      --notebook-dir=/app
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: semanticdoc-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NUXT_PUBLIC_API_BASE=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  hf_cache:
