@@ -123,6 +123,7 @@ npm run dev
 | `POST` | `/api/documents/upload` | Uploads a `.pdf` file (`multipart/form-data`), normalizes text, chunks, and indexes into FAISS |
 | `DELETE` | `/api/documents/{filename}` | Removes a PDF's vectors from FAISS and deletes the uploaded file |
 | `POST` | `/api/query` | Runs semantic search + LLM generation across all PDFs or filtered by `doc_name` |
+| `POST` | `/api/query/stream` | Real-time Server-Sent Events (SSE) stream: emits FAISS chunks in ~15ms, then streams LLM tokens word-by-word |
 
 ### Example Query Request
 

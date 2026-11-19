@@ -8,6 +8,8 @@ services:
     environment:
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - OLLAMA_MODEL=llama3.2:3b
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
     volumes:
       # Live-sync your local ./backend folder with /app in the container
       - ./backend:/app
@@ -26,6 +28,8 @@ services:
     environment:
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - OLLAMA_MODEL=llama3.2:3b
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
     volumes:
       - ./backend:/app
       - hf_cache:/app/.cache/huggingface
