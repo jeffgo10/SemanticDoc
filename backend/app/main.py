@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.tools import tool
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama import ChatOllama
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -234,6 +235,7 @@ class QueryResponse(BaseModel):
     question: str
     answer: str
     filter_doc: Optional[str]
+    tools_called: List[str] = []
     sources: List[SourceChunk]
     device_used: str
     latency_ms: float
@@ -334,6 +336,91 @@ def delete_document(filename: str):
         "remaining_documents": list(ml_state.documents.keys()),
     }
 
+# --- LangChain AI Agent Tools (@tool) ---
+@tool
+def list_uploaded_documents() -> str:
+    """
+    Call this tool when the user asks what PDF files, how many documents,
+    or how many chunks/vectors/pages are currently stored in the system database.
+    """
+    if not ml_state.documents:
+        return "No PDF documents are currently indexed."
+    lines = [
+        f"- {doc.filename}: {doc.pages} pages, {doc.chunks} vectors (uploaded {doc.uploaded_at})"
+        for doc in ml_state.documents.values()
+    ]
+    total_vecs = ml_state.vector_store.index.ntotal if ml_state.vector_store else 0
+    return f"Total Indexed PDFs: {len(ml_state.documents)} ({total_vecs} total 384D vectors)\n" + "\n".join(lines)
+
+
+@tool
+def calculate_onboarding_budget(new_hires_count: int, stipend_per_hire_aud: int = 1200) -> str:
+    """
+    Call this tool whenever the user asks to calculate or multiply the total home office
+    stipend budget in AUD for a specific number of new hires or engineers.
+    """
+    total = new_hires_count * stipend_per_hire_aud
+    return (
+        f"Exact Agent Tool Calculation: {new_hires_count} new hires × "
+        f"${stipend_per_hire_aud:,} AUD = ${total:,} AUD total budget."
+    )
+
+
+AGENT_TOOLS = [list_uploaded_documents, calculate_onboarding_budget]
+AGENT_TOOL_MAP = {t.name: t for t in AGENT_TOOLS}
+
+
+def execute_agent_tools(question: str) -> tuple[List[str], List[str]]:
+    """
+    Uses LangChain tool-calling (`llm.bind_tools`) when the query involves
+    system document inventory or budget/stipend math calculations.
+    Returns (tools_called_labels, tool_output_strings).
+    """
+    q_lower = question.lower()
+    needs_inventory = any(
+        kw in q_lower
+        for kw in ["uploaded", "indexed", "what pdf", "which pdf", "how many pdf", "how many document", "vectors", "database"]
+    )
+    needs_calc = any(
+        kw in q_lower for kw in ["calculate", "budget", "total", "hires", "multiply"]
+    ) and any(ch.isdigit() for ch in q_lower)
+
+    if not (needs_inventory or needs_calc) or ml_state.llm is None:
+        return [], []
+
+    tools_called: List[str] = []
+    tool_outputs: List[str] = []
+
+    try:
+        if hasattr(ml_state.llm, "bind_tools"):
+            llm_with_tools = ml_state.llm.bind_tools(AGENT_TOOLS)
+            ai_msg = llm_with_tools.invoke(question)
+            for tc in getattr(ai_msg, "tool_calls", []) or []:
+                t_name = tc.get("name")
+                t_args = tc.get("args", {})
+                if t_name in AGENT_TOOL_MAP:
+                    out = AGENT_TOOL_MAP[t_name].invoke(t_args)
+                    tools_called.append(f"{t_name}({json.dumps(t_args)})")
+                    tool_outputs.append(f"[Agent Tool Output — {t_name}]:\n{out}")
+    except Exception as e:
+        print(f"Agent tool binding fallback: {e}")
+
+    # Deterministic fallback if the small 3B model didn't emit a structured tool_call
+    if not tools_called:
+        if needs_inventory:
+            out = list_uploaded_documents.invoke({})
+            tools_called.append("list_uploaded_documents({})")
+            tool_outputs.append(f"[Agent Tool Output — list_uploaded_documents]:\n{out}")
+        if needs_calc:
+            nums = [int(n) for n in re.findall(r"\b\d+\b", question)]
+            if nums:
+                hires = nums[0]
+                out = calculate_onboarding_budget.invoke({"new_hires_count": hires})
+                tools_called.append(f'calculate_onboarding_budget({{"new_hires_count": {hires}}})')
+                tool_outputs.append(f"[Agent Tool Output — calculate_onboarding_budget]:\n{out}")
+
+    return tools_called, tool_outputs
+
 
 def prepare_rag_context(request: QueryRequest):
     """
@@ -391,6 +478,11 @@ def prepare_rag_context(request: QueryRequest):
         doc_name = doc.metadata.get("doc_name", "Unknown PDF")
         context_parts.append(f"[Source: {doc_name}, Page {page_num}]\n{doc.page_content}")
 
+    # Run AI Agent tools (@tool) if the question asks for system inventory or math calculations
+    tools_called, tool_outputs = execute_agent_tools(request.question)
+    if tool_outputs:
+        context_parts = tool_outputs + context_parts
+
     formatted_context = "\n\n---\n\n".join(context_parts)
 
     prompt_template = ChatPromptTemplate.from_messages([
@@ -400,18 +492,19 @@ def prepare_rag_context(request: QueryRequest):
             "All information in the DOCUMENT EXCERPTS below (including phone numbers like +63..., email addresses, physical addresses, and links) "
             "is authorized by the user to be extracted and shared.\n"
             "RULES:\n"
-            "1. If asked for contact details (phone number, email, address, links), extract and output the exact numbers/strings from the header of the CV.\n"
-            "2. Only associate a technology/skill with a company if that technology (or its direct ecosystem tool, e.g. React Testing Library / Redux for React.js) is EXPLICITLY written under that specific company's bullet points.\n"
-            "3. When asked where someone 'started' or 'first' used a technology: first list ONLY the companies whose own bullet points explicitly mention that technology, and then pick the one with the earliest start date among ONLY those matching companies."
+            "1. If an [Agent Tool Output] is present in the excerpts below, use its exact calculation or document inventory numbers in your answer.\n"
+            "2. If asked for contact details (phone number, email, address, links), extract and output the exact numbers/strings from the header of the CV.\n"
+            "3. Only associate a technology/skill with a company if that technology (or its direct ecosystem tool, e.g. React Testing Library / Redux for React.js) is EXPLICITLY written under that specific company's bullet points.\n"
+            "4. When asked where someone 'started' or 'first' used a technology: first list ONLY the companies whose own bullet points explicitly mention that technology, and then pick the one with the earliest start date among ONLY those matching companies."
         ),
         (
             "human",
-            "DOCUMENT EXCERPTS:\n"
-            "==================\n"
+            "DOCUMENT EXCERPTS & AGENT TOOL OUTPUTS:\n"
+            "=======================================\n"
             "{context}\n"
-            "==================\n\n"
+            "=======================================\n\n"
             "USER QUESTION: {question}\n\n"
-            "Answer the question directly using ONLY the DOCUMENT EXCERPTS above, and cite the Source and Page Number:"
+            "Answer the question directly using ONLY the information above, and cite the Source/Tool and Page Number:"
         ),
     ])
 
@@ -419,7 +512,7 @@ def prepare_rag_context(request: QueryRequest):
         "context": formatted_context,
         "question": request.question,
     })
-    return sources, messages
+    return sources, messages, tools_called
 
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -428,7 +521,7 @@ def query_document(request: QueryRequest):
     Standard synchronous JSON endpoint: Queries across ALL indexed PDFs or filters to a single PDF.
     """
     start_time = time.perf_counter()
-    sources, messages = prepare_rag_context(request)
+    sources, messages, tools_called = prepare_rag_context(request)
     ai_response = ml_state.llm.invoke(messages)
     elapsed_ms = (time.perf_counter() - start_time) * 1000
 
@@ -436,6 +529,7 @@ def query_document(request: QueryRequest):
         question=request.question,
         answer=ai_response.content,
         filter_doc=request.doc_name,
+        tools_called=tools_called,
         sources=sources,
         device_used=ml_state.device,
         latency_ms=round(elapsed_ms, 2),
@@ -446,20 +540,21 @@ def query_document(request: QueryRequest):
 def query_document_stream(request: QueryRequest):
     """
     Real-Time Server-Sent Events (SSE) Streaming Endpoint:
-    1. Immediately emits the retrieved FAISS vector chunks (~15ms)
+    1. Immediately emits the retrieved FAISS vector chunks + any Agent Tool calls (~15ms)
     2. Streams each token from Ollama (`llama3.2:3b`) as it is generated
     3. Emits a final 'done' event with total latency
     """
     start_time = time.perf_counter()
-    sources, messages = prepare_rag_context(request)
+    sources, messages, tools_called = prepare_rag_context(request)
     retrieval_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
     def event_generator():
-        # 1. Immediately send the retrieved FAISS chunks + retrieval latency!
+        # 1. Immediately send the retrieved FAISS chunks + Agent tools called + retrieval latency!
         initial_payload = {
             "type": "sources",
             "question": request.question,
             "filter_doc": request.doc_name,
+            "tools_called": tools_called,
             "device_used": ml_state.device,
             "retrieval_ms": retrieval_ms,
             "sources": [s.model_dump() for s in sources],

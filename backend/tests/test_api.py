@@ -125,3 +125,28 @@ def test_pydantic_input_validation():
             files={"file": ("hack.txt", b"not a pdf", "text/plain")},
         )
         assert bad_upload.status_code == 400
+
+
+def test_agent_tool_calling_integration():
+    """
+    6. AI Agent Tool-Calling Test: Verifies that budget calculation and inventory
+    questions trigger the @tool functions (`calculate_onboarding_budget`, `list_uploaded_documents`)
+    and return `tools_called` in the API response.
+    """
+    with TestClient(app) as client:
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(
+            content="Total stipend budget for 14 hires is $16,800 AUD."
+        )
+        ml_state.llm = mock_llm
+
+        res = client.post(
+            "/api/query",
+            json={
+                "question": "If GoLogic hires 14 engineers, calculate the total stipend budget.",
+                "top_k": 2,
+            },
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert any("calculate_onboarding_budget" in t for t in body["tools_called"])

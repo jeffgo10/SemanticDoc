@@ -13,4 +13,5 @@ python-multipart
 jupyterlab
 ipywidgets
 pytest
+pytest-cov
 httpx

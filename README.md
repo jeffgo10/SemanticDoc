@@ -149,4 +149,5 @@ The `backend/playground/` folder contains standalone scripts that break down how
 4. **`04_pdf_chunking.py`** — Loads and splits PDFs with `RecursiveCharacterTextSplitter`.
 5. **`05_faiss_vector_store.py`** — Builds, saves, and queries a local FAISS index.
 6. **`06_rag_agent.py`** — Connects FAISS retrieval with local Ollama generation.
-7. **`SemanticDoc_Walkthrough.ipynb`** — Interactive Jupyter notebook combining all steps.
+7. **`07_ai_agent_tool_calling.py`** — Autonomous LangChain AI Agent (`@tool` + `bind_tools`) that dynamically selects between document inventory, FAISS RAG search, and budget calculation tools.
+8. **`SemanticDoc_Walkthrough.ipynb`** — Interactive Jupyter notebook combining all steps.

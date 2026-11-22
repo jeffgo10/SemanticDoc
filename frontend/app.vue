@@ -280,6 +280,13 @@
                   Scope: {{ queryResult.filter_doc || 'All PDFs' }}
                 </span>
                 <span
+                  v-for="(toolCall, tIdx) in queryResult.tools_called || []"
+                  :key="tIdx"
+                  class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono"
+                >
+                  🛠️ Tool: {{ toolCall }}
+                </span>
+                <span
                   v-if="querying"
                   class="text-xs px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 animate-pulse"
                 >
@@ -395,6 +402,7 @@ interface QueryResponse {
   question: string
   answer: string
   filter_doc: string | null
+  tools_called?: string[]
   sources: SourceChunk[]
   device_used: string
   retrieval_ms?: number
@@ -418,9 +426,9 @@ const queryError = ref('')
 
 const sampleQuestions = [
   'How much is the home office stipend and what can I buy with it?',
-  'If there is a critical security bug on a Friday, can I deploy to production?',
-  'How fast do I need to acknowledge a SEV-1 PagerDuty alert?',
-  'What is the company policy on bringing dogs to the office?'
+  'If GoLogic hires 14 new engineers, calculate the total home office stipend budget in AUD.',
+  'What PDF files are currently uploaded in our database and how many vectors do they have?',
+  'If there is a critical security bug on a Friday, can I deploy to production?'
 ]
 
 async function fetchHealth() {
@@ -539,6 +547,7 @@ async function submitQuestion() {
             question: payload.question,
             answer: '',
             filter_doc: payload.filter_doc,
+            tools_called: payload.tools_called || [],
             sources: payload.sources,
             device_used: payload.device_used,
             retrieval_ms: payload.retrieval_ms,
