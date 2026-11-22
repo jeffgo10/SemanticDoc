@@ -28,6 +28,9 @@ venv/
 ENV/
 env/
 .pytest_cache/
+.coverage
+backend/.coverage
+htmlcov/
 .mypy_cache/
 .ruff_cache/
 
