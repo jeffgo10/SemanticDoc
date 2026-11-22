@@ -12,3 +12,5 @@ uvicorn[standard]
 python-multipart
 jupyterlab
 ipywidgets
+pytest
+httpx
